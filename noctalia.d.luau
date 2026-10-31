@@ -63,6 +63,11 @@ export type WallpaperMask = {
   wallpaperPath: string,
 }
 
+export type ActiveWidgetSet = {
+  id: string,
+  name: string,
+}
+
 export type PanelContextMenuAction = {
   kind: "item"?, -- may be omitted for action rows
   id: string,
@@ -264,6 +269,8 @@ export type Noctalia = {
   -- reveal the wallpaper. API 25.
   wallpaperPath: (connector: string) -> string?,
   setWallpaperMask: (connector: string, mask: WallpaperMask?) -> (),
+  -- The desktop widget set active on the output, or nil when none is active. API 46.
+  activeWidgetSet: (connector: string) -> ActiveWidgetSet?,
 
   togglePanel: (panelId: string) -> (), -- "author/plugin:panel"
   -- Opens the settings window at this plugin's settings; no-op without settings. API 15.
