@@ -16,7 +16,7 @@ Wallpapers are never uploaded.
 
 ## Requirements
 
-Requires Noctalia plugin API 26.
+Requires Noctalia plugin API 46.
 
 Install `python3` version 3.11–3.14 with `venv` and `pip` support. Initial setup
 requires network access, and shell offline mode must be disabled.
@@ -53,6 +53,15 @@ the bar.
 The panel reports generation state for every connected output. **Clear cache**
 removes saved depth maps and masks; the plugin regenerates them when needed.
 
+### Per widget set
+
+Each output shows the desktop widget set that is active on it. Its sliders
+override **Foreground threshold** and **Edge feather** for that set only, so a
+busy set can keep widgets readable while a minimal one lets them disappear
+behind the scenery. **Reset** drops the override and falls back to the settings
+above. Overrides are stored in the plugin data directory and survive restarts;
+switching a set regenerates only the outputs whose effective parameters changed.
+
 The panel close button respects the shell's `shell.show_close_buttons` setting.
 If the setting is missing, the close button remains visible.
 
@@ -63,6 +72,9 @@ If the setting is missing, the close button remains visible.
 | `auto_generate` | `bool` | `true` | Regenerates masks when a wallpaper or mask parameter changes. |
 | `threshold` | `int` | `30` | Normalized depth cutoff from 0–100. Lower values place more of the scene in front of desktop widgets. |
 | `feather` | `int` | `8` | Soft-transition width around the depth cutoff, from 0–50. |
+
+`threshold` and `feather` are defaults: a per widget set override takes
+precedence on outputs where that set is active.
 
 ## How it works
 

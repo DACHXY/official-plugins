@@ -2,6 +2,8 @@
 
 local closeButton = true
 
+local render
+
 local status = {
   setupState = "checking",
   setupMessage = "",
@@ -33,23 +35,132 @@ local function outputState(row)
   return "photo-off", "on_surface_variant", tr("panel.output.no_wallpaper")
 end
 
+local drafts = {}
+
+local function draftValue(row, field, fallback)
+  local draft = drafts[row.name]
+  local value = type(draft) == "table" and draft[field] or nil
+  if type(value) == "number" then
+    return value
+  end
+  return fallback or 0
+end
+
+local function setDraft(row, field, value)
+  local number = tonumber(value)
+  if number == nil then
+    return
+  end
+  local draft = drafts[row.name] or {}
+  draft[field] = math.floor(number + 0.5)
+  drafts[row.name] = draft
+end
+
+local function clearSetOverride(row)
+  drafts[row.name] = nil
+  noctalia.state.set("wallpaper_depth.command", { action = "clear_override", outputName = row.name })
+end
+
+local function commitSetOverride(row)
+  local draft = drafts[row.name]
+  if type(draft) ~= "table" then
+    return
+  end
+  drafts[row.name] = nil
+  noctalia.state.set("wallpaper_depth.command", {
+    action = "set_override",
+    outputName = row.name,
+    threshold = draftValue(row, "threshold", row.threshold),
+    feather = draftValue(row, "feather", row.feather),
+  })
+end
+
+local function setSlider(row, field, maximum, title)
+  local value = draftValue(row, field, row[field])
+  return ui.row({ gap = 8, align = "center" }, {
+    ui.label({ text = title, color = "on_surface_variant", fontSize = 10, flexGrow = 1 }),
+    ui.label({ text = tostring(value) .. "%", fontSize = 10, fontWeight = "bold" }),
+    ui.slider({
+      min = 0,
+      max = maximum,
+      step = 1,
+      value = value,
+      width = 160,
+      onChange = function(changed)
+        setDraft(row, field, changed)
+        render()
+      end,
+      onDragEnd = function() commitSetOverride(row) end,
+    }),
+  })
+end
+
+local function setControls(row)
+  if type(row.setId) ~= "string" then
+    return nil
+  end
+  return ui.column({ gap = 6, paddingH = 10 }, {
+    ui.row({ gap = 6, align = "center" }, {
+      ui.glyph({
+        name = "layers-subtract",
+        size = 14,
+        color = row.hasOverride == true and "primary" or "on_surface_variant",
+      }),
+      ui.label({
+        text = tr("panel.set") .. ": " .. (row.setName or row.setId),
+        color = "on_surface_variant",
+        fontSize = 11,
+        flexGrow = 1,
+      }),
+      ui.button({
+        text = tr("panel.reset"),
+        glyph = "arrow-back-up",
+        variant = "ghost",
+        controlSize = "sm",
+        enabled = row.hasOverride == true,
+        onClick = function() clearSetOverride(row) end,
+      }),
+    }),
+    setSlider(row, "threshold", 100, tr("panel.threshold")),
+    setSlider(row, "feather", 50, tr("panel.feather")),
+  })
+end
+
+local function outputRow(row)
+  local glyph, color, detail = outputState(row)
+  local card = ui.row({
+    gap = 10,
+    align = "center",
+    padding = 10,
+    radius = 8,
+    fill = "surface_container/0.35",
+  }, {
+    ui.glyph({ name = glyph, size = 18, color = color }),
+    ui.column({ gap = 2, flexGrow = 1 }, {
+      ui.label({ text = row.name or "", fontWeight = "bold", fontSize = 13 }),
+      ui.label({ text = detail, color = color, fontSize = 11, wrap = true }),
+    }),
+  })
+  local controls = setControls(row)
+  if controls == nil then
+    return card
+  end
+  return ui.column({ gap = 6 }, { card, controls })
+end
+
+local function anySetActive()
+  for _, row in ipairs(status.outputs or {}) do
+    if type(row.setId) == "string" then
+      return true
+    end
+  end
+  return false
+end
+
 local function outputRows()
   local rows = {}
   for _, row in ipairs(status.outputs or {}) do
-    local glyph, color, detail = outputState(row)
-    table.insert(rows, ui.row({
-      gap = 10,
-      align = "center",
-      padding = 10,
-      radius = 8,
-      fill = "surface_container/0.35",
-    }, {
-      ui.glyph({ name = glyph, size = 18, color = color }),
-      ui.column({ gap = 2, flexGrow = 1 }, {
-        ui.label({ text = row.name or "", fontWeight = "bold", fontSize = 13 }),
-        ui.label({ text = detail, color = color, fontSize = 11, wrap = true }),
-      }),
-    }))
+    table.insert(rows, outputRow(row))
   end
   if #rows == 0 then
     table.insert(rows, ui.label({
@@ -141,7 +252,7 @@ local function setupCard()
   return ui.column({ gap = 8, padding = 10, radius = 8, fill = "surface_container/0.35" }, children)
 end
 
-local function render()
+function render()
   local ready = status.setupState == "ready"
   local threshold = math.floor((status.threshold or 0) * 100 + 0.5)
   local feather = math.floor((status.feather or 0) * 100 + 0.5)
@@ -187,6 +298,13 @@ local function render()
     }),
     ui.separator({}),
     ui.label({ text = tr("panel.outputs"), fontWeight = "bold", fontSize = 13 }),
+    ui.label({
+      text = tr("panel.set_hint"),
+      color = "on_surface_variant",
+      fontSize = 11,
+      wrap = true,
+      visible = anySetActive(),
+    }),
     ui.scroll({ flexGrow = 1, gap = 6 }, outputRows()),
     ui.row({ gap = 8 }, {
       ui.button({

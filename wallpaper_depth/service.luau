@@ -9,6 +9,7 @@ if dataDir == nil then
   error("Wallpaper Depth requires a plugin data directory")
 end
 local operationPath = dataDir .. "/setup-operation.json"
+local overridesPath = dataDir .. "/set-overrides.json"
 
 local setupState = "checking"
 local setupMessage = ""
@@ -17,8 +18,9 @@ local cacheOperation = false
 local pending = {}
 local queued = {}
 local outputs = {}
-local lastParametersKey = nil
 local lastAutoGenerate = nil
+-- Per desktop widget set overrides: { [setId] = { threshold = 0-100, feather = 0-50 } }.
+local overrides = {}
 local pythonAvailable = noctalia.commandExists("python3")
 
 local function decodeObject(raw)
@@ -66,9 +68,77 @@ local function parameters()
   }, nil
 end
 
+-- The active desktop widget set on an output, or nil on shells without the API.
+local function activeSetFor(outputName)
+  if type(noctalia.activeWidgetSet) ~= "function" or type(outputName) ~= "string" then
+    return nil
+  end
+  local set = noctalia.activeWidgetSet(outputName)
+  if type(set) ~= "table" or type(set.id) ~= "string" or set.id == "" then
+    return nil
+  end
+  return set
+end
+
+-- Global settings, overridden by the active widget set's entry. The key covers the effective
+-- values plus the set id, so switching sets or editing an override invalidates cached work.
+local function parametersFor(outputName)
+  local base, err = parameters()
+  if base == nil then
+    return nil, err
+  end
+  local effective = {
+    threshold = base.threshold,
+    feather = base.feather,
+    autoGenerate = base.autoGenerate,
+    setId = nil,
+    setName = nil,
+    hasOverride = false,
+  }
+  local set = activeSetFor(outputName)
+  if set ~= nil then
+    effective.setId = set.id
+    effective.setName = type(set.name) == "string" and set.name or set.id
+    local override = overrides[set.id]
+    if type(override) == "table" then
+      if type(override.threshold) == "number" then
+        effective.threshold = math.max(0, math.min(100, override.threshold)) / 100
+        effective.hasOverride = true
+      end
+      if type(override.feather) == "number" then
+        effective.feather = math.max(0, math.min(50, override.feather)) / 100
+        effective.hasOverride = true
+      end
+    end
+  end
+  effective.key = string.format("%.4f:%.4f:%s", effective.threshold, effective.feather, effective.setId or "")
+  return effective, nil
+end
+
+local function loadOverrides()
+  local value = decodeObject(noctalia.readFile(overridesPath))
+  return type(value) == "table" and value or {}
+end
+
+local function saveOverrides()
+  local ok, err = noctalia.writeFile(overridesPath, noctalia.json.encode(overrides))
+  if not ok then
+    setupMessage = type(err) == "string" and err or noctalia.tr("service.override_save_failed")
+  end
+  return ok
+end
+
+local function clampSetting(value, minimum, maximum)
+  if type(value) ~= "number" then
+    return nil
+  end
+  return math.max(minimum, math.min(maximum, math.floor(value + 0.5)))
+end
+
 local function publish()
   local rows = {}
   for _, row in pairs(outputs) do
+    local params = parametersFor(row.name)
     table.insert(rows, {
       name = row.name,
       wallpaperPath = row.wallpaperPath,
@@ -76,6 +146,11 @@ local function publish()
       message = row.message,
       cacheHit = row.cacheHit,
       elapsedMs = row.elapsedMs,
+      setId = params ~= nil and params.setId or nil,
+      setName = params ~= nil and params.setName or nil,
+      hasOverride = params ~= nil and params.hasOverride or false,
+      threshold = params ~= nil and math.floor(params.threshold * 100 + 0.5) or nil,
+      feather = params ~= nil and math.floor(params.feather * 100 + 0.5) or nil,
     })
   end
   table.sort(rows, function(left, right)
@@ -144,7 +219,11 @@ runNext = function()
     local candidate = table.remove(pending, 1)
     queued[candidate.outputName] = nil
     local currentPath = noctalia.wallpaperPath(candidate.outputName)
-    if currentPath == candidate.wallpaperPath and candidate.parametersKey == params.key then
+    local currentParameters = parametersFor(candidate.outputName)
+    if currentPath == candidate.wallpaperPath
+      and currentParameters ~= nil
+      and candidate.parametersKey == currentParameters.key
+    then
       job = candidate
       break
     end
@@ -184,7 +263,7 @@ runNext = function()
       return
     end
 
-    local currentParameters = parameters()
+    local currentParameters = parametersFor(completedJob.outputName)
     local currentPath = noctalia.wallpaperPath(completedJob.outputName)
     local currentRow = outputs[completedJob.outputName]
     local stale = currentParameters == nil
@@ -256,13 +335,15 @@ local function enqueueAll(force)
     return
   end
   for outputName, row in pairs(outputs) do
-    if type(row.wallpaperPath) == "string" and row.wallpaperPath ~= "" then
+    local effective = parametersFor(outputName)
+    if effective ~= nil and type(row.wallpaperPath) == "string" and row.wallpaperPath ~= "" then
       if force then
         noctalia.setWallpaperMask(outputName, nil)
         row.state = "waiting"
         row.message = ""
+        row.parametersKey = effective.key
       end
-      enqueue(outputName, row.wallpaperPath, params)
+      enqueue(outputName, row.wallpaperPath, effective)
     end
   end
   publish()
@@ -402,16 +483,19 @@ local function syncOutputs()
       row = { name = output.name, state = "no_wallpaper", message = "" }
       outputs[output.name] = row
     end
-    if row.wallpaperPath ~= wallpaperPath then
+    local effective = parametersFor(output.name)
+    local parametersKey = effective ~= nil and effective.key or nil
+    if row.wallpaperPath ~= wallpaperPath or row.parametersKey ~= parametersKey then
       noctalia.setWallpaperMask(output.name, nil)
       row.wallpaperPath = wallpaperPath
+      row.parametersKey = parametersKey
       row.state = wallpaperPath ~= nil and "waiting" or "no_wallpaper"
       row.message = ""
       row.cacheHit = nil
       row.elapsedMs = nil
       queued[output.name] = nil
-      if params.autoGenerate and wallpaperPath ~= nil then
-        enqueue(output.name, wallpaperPath, params)
+      if params.autoGenerate and wallpaperPath ~= nil and effective ~= nil then
+        enqueue(output.name, wallpaperPath, effective)
       end
     end
   end
@@ -422,29 +506,55 @@ local function syncOutputs()
     end
   end
 
-  if lastParametersKey ~= nil and lastParametersKey ~= params.key then
-    for outputName, row in pairs(outputs) do
-      noctalia.setWallpaperMask(outputName, nil)
-      row.state = row.wallpaperPath ~= nil and "waiting" or "no_wallpaper"
-      row.message = ""
-    end
-    pending = {}
-    queued = {}
-    if params.autoGenerate then
-      enqueueAll(false)
-    end
-  end
   if lastAutoGenerate == false and params.autoGenerate then
     for outputName, row in pairs(outputs) do
       if row.state == "waiting" and row.wallpaperPath ~= nil then
-        enqueue(outputName, row.wallpaperPath, params)
+        local effective = parametersFor(outputName)
+        if effective ~= nil then
+          enqueue(outputName, row.wallpaperPath, effective)
+        end
       end
     end
   end
-  lastParametersKey = params.key
   lastAutoGenerate = params.autoGenerate
   publish()
   runNext()
+end
+
+local function setOverride(outputName, threshold, feather)
+  local set = activeSetFor(outputName)
+  if set == nil then
+    setupMessage = noctalia.tr("service.no_active_set")
+    publish()
+    return
+  end
+  local clampedThreshold = clampSetting(threshold, 0, 100)
+  local clampedFeather = clampSetting(feather, 0, 50)
+  if clampedThreshold == nil or clampedFeather == nil then
+    setupMessage = noctalia.tr("service.invalid_settings")
+    publish()
+    return
+  end
+  overrides[set.id] = { threshold = clampedThreshold, feather = clampedFeather }
+  setupMessage = ""
+  saveOverrides()
+  syncOutputs()
+end
+
+local function clearOverride(outputName)
+  local set = activeSetFor(outputName)
+  if set == nil then
+    setupMessage = noctalia.tr("service.no_active_set")
+    publish()
+    return
+  end
+  if overrides[set.id] == nil then
+    return
+  end
+  overrides[set.id] = nil
+  setupMessage = ""
+  saveOverrides()
+  syncOutputs()
 end
 
 noctalia.state.watch("wallpaper_depth.command", function(command)
@@ -458,6 +568,10 @@ noctalia.state.watch("wallpaper_depth.command", function(command)
     enqueueAll(true)
   elseif command.action == "clear_cache" then
     clearCache()
+  elseif command.action == "set_override" then
+    setOverride(command.outputName, command.threshold, command.feather)
+  elseif command.action == "clear_override" then
+    clearOverride(command.outputName)
   end
 end)
 
@@ -481,6 +595,7 @@ function update()
 end
 
 local operation = readOperation()
+overrides = loadOverrides()
 if operation ~= nil and (operation.state == "running" or operation.state == "starting") then
   setupState = "running"
   setupMessage = noctalia.tr("service.setup_running")
